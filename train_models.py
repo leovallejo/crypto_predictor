@@ -19,16 +19,16 @@ import keras_tuner as kt
 from config import *
 
 # Configure GPU
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
-        # Limit GPU memory growth to prevent OOM errors
+try:
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        # Restrict TensorFlow to only use 75% of GPU memory
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         logical_gpus = tf.config.list_logical_devices('GPU')
         print(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
-    except RuntimeError as e:
-        print(e)
+except RuntimeError as e:
+    print(f"GPU Error: {e}")
 
 # Configure logging
 logging.basicConfig(
