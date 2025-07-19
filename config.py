@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 # --- Directory Config ---
@@ -43,9 +44,14 @@ TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 DATA_FETCH_LIMIT = 2000
 
 # --- Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Logging ---
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 LOG_FILE = os.path.join(BASE_DIR, 'training.log')
+
+# --- Live Monitor ---
+REFRESH_INTERVAL = 2
+SHOW_LAST_N = 15
+PREDICTION_HISTORY_FILE = os.path.join(DATA_DIR, 'prediction_history.csv')
