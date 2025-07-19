@@ -41,7 +41,7 @@ TECHNICAL_INDICATORS = {
 # --- API Config ---
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
-DATA_FETCH_LIMIT = 2000
+DATA_FETCH_LIMIT = 1000  # Reduced from 2000 to avoid API limits
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
