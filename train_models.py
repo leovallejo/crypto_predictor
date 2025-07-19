@@ -5,7 +5,7 @@ import requests
 import joblib
 import logging
 from datetime import datetime
-import tensorflow as tf  # Import TensorFlow first
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import (Conv1D, MaxPooling1D, LSTM, Dense, 
                                    Dropout, BatchNormalization)
@@ -31,19 +31,16 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
 tf.get_logger().setLevel('ERROR')
 
 def configure_gpu():
-    """Configure GPU settings and suppress initialization warnings"""
+    """Configure GPU settings"""
     try:
-        # Check for GPUs
         gpus = tf.config.list_physical_devices('GPU')
         if not gpus:
             logger.warning("No GPUs detected - falling back to CPU")
             return False
         
-        # Enable memory growth to prevent OOM errors
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         
-        # Verify configuration
         logical_gpus = tf.config.list_logical_devices('GPU')
         logger.info(f"Detected {len(gpus)} physical GPUs, {len(logical_gpus)} logical GPUs")
         return True
@@ -70,23 +67,16 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
     """Fetch OHLCV data from Binance API"""
     try:
         url = "https://api.binance.com/api/v3/klines"
-        params = {
-            'symbol': symbol,
-            'interval': interval,
-            'limit': limit
-        }
+        params = {'symbol': symbol, 'interval': interval, 'limit': limit}
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
         
-        # Parse response
-        data = response.json()
-        df = pd.DataFrame(data, columns=[
+        df = pd.DataFrame(response.json(), columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_av", "trades", "tb_base_av",
             "tb_quote_av", "ignore"
         ])
         
-        # Process dataframe
         df = df[["timestamp", "open", "high", "low", "close", "volume"]]
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -101,15 +91,15 @@ def calculate_rsi(prices, window=14):
     delta = prices.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    
     avg_gain = gain.rolling(window).mean()
     avg_loss = loss.rolling(window).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rs = avg_gain / (avg_loss + 1e-10)
     return 100 - (100 / (1 + rs))
 
 def add_technical_indicators(df):
     """Add all technical indicators to dataframe"""
+    df = df.copy()
+    
     # Price transformations
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df['close_5ma'] = df['close'].rolling(5).mean()
@@ -154,10 +144,9 @@ def create_sequences(data, seq_length, horizon):
 
 def prepare_data(df):
     """Prepare data for training with proper scaling"""
-    # Add indicators
     df = add_technical_indicators(df)
     
-    # Select features (all except timestamp)
+    # Get feature columns dynamically
     feature_cols = [col for col in df.columns if col != 'timestamp']
     
     # Initialize scalers
@@ -176,7 +165,7 @@ def prepare_data(df):
     # Create sequences
     X, y = create_sequences(processed_data, SEQUENCE_LENGTH, FORECAST_HORIZON)
     
-    # Train-test split (time-series aware)
+    # Train-test split
     split = int(len(X) * TRAIN_TEST_SPLIT)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -187,12 +176,22 @@ def build_model(hp):
     """Build CNN-LSTM model with hyperparameter tuning"""
     model = Sequential()
     
+    # Get number of features from prepared data
+    num_features = len(FEATURES) if 'FEATURES' in globals() else (
+        len(TECHNICAL_INDICATORS['MA']) +
+        len(TECHNICAL_INDICATORS['EMA']) +
+        len(TECHNICAL_INDICATORS['RSI']) +
+        (3 if TECHNICAL_INDICATORS['MACD'] else 0) +
+        (4 * len(TECHNICAL_INDICATORS['BOLLINGER'])) +
+        2  # log_ret and close_5ma
+    )
+    
     # Convolutional layers
     model.add(Conv1D(
         filters=hp.Int('conv_filters', 32, 256, step=32),
         kernel_size=hp.Int('kernel_size', 3, 9, step=2),
         activation='relu',
-        input_shape=(SEQUENCE_LENGTH, len(FEATURES) + 1),  # +1 for close price
+        input_shape=(SEQUENCE_LENGTH, num_features + 1),  # +1 for close price
         kernel_regularizer=l2(hp.Float('l2_reg', 1e-5, 1e-3, sampling='log'))
     ))
     model.add(BatchNormalization())
@@ -224,7 +223,6 @@ def train_model(token, timeframe):
     tag = f"{token}_{timeframe}"
     model_path = os.path.join(MODEL_DIR, f"{tag}_model.h5")
     
-    # Skip if model already exists
     if os.path.exists(model_path):
         logger.info(f"Skipping {tag} - model exists")
         return
@@ -235,7 +233,11 @@ def train_model(token, timeframe):
         
         # Fetch and prepare data
         df = fetch_binance_data(symbol, timeframe)
-        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, feat_cols = prepare_data(df)
+        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, feature_cols = prepare_data(df)
+        
+        # Make features available globally for model building
+        global FEATURES
+        FEATURES = feature_cols
         
         # Initialize tuner
         tuner = kt.Hyperband(
@@ -251,8 +253,17 @@ def train_model(token, timeframe):
         
         # Callbacks
         callbacks = [
-            EarlyStopping(patience=EARLY_STOPPING_PATIENCE, restore_best_weights=True),
-            ReduceLROnPlateau(factor=0.5, patience=5),
+            EarlyStopping(
+                monitor='val_loss',
+                patience=EARLY_STOPPING_PATIENCE,
+                restore_best_weights=True
+            ),
+            ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6
+            ),
             ModelCheckpoint(
                 filepath=model_path,
                 save_best_only=True,
@@ -285,13 +296,7 @@ def train_model(token, timeframe):
             for k, v in best_hps.values.items():
                 f.write(f"{k}: {v}\n")
         
-        # Send completion message
-        completion_msg = (
-            f"✅ {tag} training complete\n"
-            f"Best val_loss: {tuner.oracle.get_best_trials()[0].score:.4f}\n"
-            f"Parameters: {best_hps.values}"
-        )
-        send_telegram_message(completion_msg)
+        send_telegram_message(f"✅ {tag} training complete | Val loss: {tuner.oracle.get_best_trials()[0].score:.4f}")
         
     except Exception as e:
         error_msg = f"❌ {tag} training failed: {str(e)}"
