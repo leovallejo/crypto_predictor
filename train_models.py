@@ -5,6 +5,7 @@ import requests
 import joblib
 import logging
 from datetime import datetime
+import tensorflow as tf  # Import TensorFlow first
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import (Conv1D, MaxPooling1D, LSTM, Dense, 
                                    Dropout, BatchNormalization)
@@ -14,29 +15,45 @@ from tensorflow.keras.callbacks import (EarlyStopping, ModelCheckpoint,
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.losses import Huber
 from sklearn.preprocessing import RobustScaler
-from sklearn.model_selection import train_test_split
 import keras_tuner as kt
 from config import *
 
-# Configure GPU
-try:
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        # Restrict TensorFlow to only use 75% of GPU memory
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        logical_gpus = tf.config.list_logical_devices('GPU')
-        print(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
-except RuntimeError as e:
-    print(f"GPU Error: {e}")
-
-# Configure logging
+# Initialize logging
 logging.basicConfig(
     filename=os.path.join(MODEL_DIR, 'training.log'),
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress TensorFlow info and warning messages
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warnings, 3=errors
+tf.get_logger().setLevel('ERROR')
+
+def configure_gpu():
+    """Configure GPU settings and suppress initialization warnings"""
+    try:
+        # Check for GPUs
+        gpus = tf.config.list_physical_devices('GPU')
+        if not gpus:
+            logger.warning("No GPUs detected - falling back to CPU")
+            return False
+        
+        # Enable memory growth to prevent OOM errors
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        
+        # Verify configuration
+        logical_gpus = tf.config.list_logical_devices('GPU')
+        logger.info(f"Detected {len(gpus)} physical GPUs, {len(logical_gpus)} logical GPUs")
+        return True
+        
+    except RuntimeError as e:
+        logger.error(f"GPU configuration error: {str(e)}")
+        return False
+
+# Initialize GPU
+gpu_available = configure_gpu()
 
 def send_telegram_message(message):
     """Send notifications via Telegram"""
@@ -52,7 +69,7 @@ def send_telegram_message(message):
 def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
     """Fetch OHLCV data from Binance API"""
     try:
-        url = f"https://api.binance.com/api/v3/klines"
+        url = "https://api.binance.com/api/v3/klines"
         params = {
             'symbol': symbol,
             'interval': interval,
@@ -69,7 +86,7 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
             "tb_quote_av", "ignore"
         ])
         
-        # Keep only relevant columns
+        # Process dataframe
         df = df[["timestamp", "open", "high", "low", "close", "volume"]]
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
@@ -80,7 +97,7 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
         raise
 
 def calculate_rsi(prices, window=14):
-    """Relative Strength Index (Pure Python Implementation)"""
+    """Calculate Relative Strength Index"""
     delta = prices.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -228,15 +245,23 @@ def train_model(token, timeframe):
             factor=3,
             hyperband_iterations=HYPERBAND_ITERATIONS,
             directory=os.path.join(MODEL_DIR, 'tuning'),
-            project_name=tag
+            project_name=tag,
+            overwrite=True
         )
         
         # Callbacks
         callbacks = [
             EarlyStopping(patience=EARLY_STOPPING_PATIENCE, restore_best_weights=True),
             ReduceLROnPlateau(factor=0.5, patience=5),
-            ModelCheckpoint(model_path, save_best_only=True),
-            TensorBoard(log_dir=os.path.join(MODEL_DIR, 'logs', tag))
+            ModelCheckpoint(
+                filepath=model_path,
+                save_best_only=True,
+                monitor='val_loss'
+            ),
+            TensorBoard(
+                log_dir=os.path.join(MODEL_DIR, 'logs', tag),
+                histogram_freq=1
+            )
         ]
         
         # Hyperparameter search
