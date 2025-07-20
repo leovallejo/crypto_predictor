@@ -49,6 +49,7 @@ def configure_environment():
     print("Environment configured for CPU-only training")
     print(f"TensorFlow version: {tf.__version__}")
     print(f"Keras Tuner version: {kt.__version__}")
+    print(f"Expected input shape: (None, {SEQUENCE_LENGTH}, {FEATURE_COUNT})")
 
 configure_environment()
 
@@ -79,14 +80,20 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
     params = {
         'symbol': symbol,
         'interval': interval,
-        'limit': min(limit, 500)
+        'limit': limit
     }
     
     for attempt in range(5):
         try:
             endpoint = endpoints[attempt % len(endpoints)]
             headers = {'User-Agent': ua.random}
-            response = requests.get(endpoint, params=params, headers=headers, timeout=15)
+            
+            response = requests.get(
+                endpoint,
+                params=params,
+                headers=headers,
+                timeout=15
+            )
             
             if response.status_code == 451:
                 return fetch_alternative_data(symbol, interval, limit)
@@ -111,13 +118,14 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
 def fetch_alternative_data(symbol, interval, limit):
     """Fallback data source when Binance API fails"""
     logger.warning(f"Using alternative data source for {symbol}/{interval}")
-    from pycoingecko import CoinGeckoAPI
-    cg = CoinGeckoAPI()
-    
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=min(limit, 365))
     
     try:
+        from pycoingecko import CoinGeckoAPI
+        cg = CoinGeckoAPI()
+        
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=min(limit, 365))
+        
         coin_id = 'bitcoin' if 'BTC' in symbol else 'ethereum'
         data = cg.get_coin_market_chart_range_by_id(
             id=coin_id,
@@ -133,7 +141,9 @@ def fetch_alternative_data(symbol, interval, limit):
         df['high'] = df['close']
         df['low'] = df['close']
         df['volume'] = 0
+        
         return df.astype(float)
+        
     except Exception as e:
         logger.error(f"Alternative data source failed: {str(e)}")
         raise Exception("All data sources failed")
@@ -149,73 +159,83 @@ def calculate_rsi(prices, window=14):
     return 100 - (100 / (1 + rs))
 
 def add_technical_indicators(df):
-    """Add technical indicators matching the expected feature count"""
-    # Calculate the number of features we need based on TECHNICAL_INDICATORS
-    expected_features = 9  # This should match your model's input shape
+    """Add technical indicators matching FEATURE_COUNT"""
+    if len(df) < 30:
+        raise ValueError("Insufficient data points for indicators")
     
-    # Basic price features (5 total: open, high, low, close, volume)
+    # Base columns (open, high, low, close, volume)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
-    # Moving Averages (adds len(TECHNICAL_INDICATORS['MA']) features)
-    for ma in TECHNICAL_INDICATORS['MA'][:2]:  # Limit to 2 MAs to match expected_features
+    # Add only the indicators specified in config
+    for ma in TECHNICAL_INDICATORS['MA']:
         df[f'MA_{ma}'] = df['close'].rolling(ma).mean()
     
-    # RSI (adds 1 feature)
-    df['RSI_14'] = calculate_rsi(df['close'])
+    if 'RSI' in TECHNICAL_INDICATORS:
+        df['RSI_14'] = calculate_rsi(df['close'])
     
-    # MACD (adds 1 feature)
-    ema12 = df['close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
+    if 'MACD' in TECHNICAL_INDICATORS:
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
     
-    # Ensure we have exactly the expected number of features
-    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'log_ret',
-                   'MA_7', 'MA_14', 'RSI_14', 'MACD']
-    feature_cols = feature_cols[:expected_features]
+    # Verify we have the expected number of features
+    current_features = len(df.columns)
+    if current_features != FEATURE_COUNT + 1:  # +1 for timestamp
+        raise ValueError(f"Feature count mismatch. Expected {FEATURE_COUNT}, got {current_features - 1}")
     
-    return df[feature_cols].dropna()
+    return df.dropna()
 
 def create_sequences(data, seq_length, horizon):
-    """Create time-series sequences"""
+    """Create time-series sequences with shape verification"""
     X, y = [], []
     for i in range(seq_length, len(data) - horizon):
         X.append(data[i-seq_length:i])
-        y.append(data[i:i+horizon, 3])  # Predict close price (index 3)
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
+        y.append(data[i:i+horizon, 0])  # Predict close price
+    
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.float32)
+    
+    # Verify input shape matches model expectations
+    if X.shape[-1] != FEATURE_COUNT:
+        raise ValueError(f"Input feature dimension mismatch. Expected {FEATURE_COUNT}, got {X.shape[-1]}")
+    
+    return X, y
 
 def prepare_data(df):
-    """Prepare training data with consistent feature count"""
+    """Prepare training data with shape validation"""
     df = add_technical_indicators(df)
-    
-    # Verify we have the correct number of features
-    num_features = len(df.columns)
-    print(f"Number of features in prepared data: {num_features}")  # Should be 9
+    feature_cols = [col for col in df.columns if col != 'timestamp']
     
     # Scaling
     feature_scaler = RobustScaler()
     close_scaler = RobustScaler()
     
-    features = feature_scaler.fit_transform(df)
+    features = feature_scaler.fit_transform(df[feature_cols])
     close_prices = close_scaler.fit_transform(df[['close']])
     
-    # Create sequences
-    X, y = create_sequences(features, SEQUENCE_LENGTH, FORECAST_HORIZON)
+    # Combine and create sequences
+    processed_data = np.concatenate([close_prices, features], axis=1)
+    X, y = create_sequences(processed_data, SEQUENCE_LENGTH, FORECAST_HORIZON)
     
-    # Train-test split
+    # Train-test split with shuffling
+    indices = np.arange(len(X))
+    np.random.shuffle(indices)
     split = int(len(X) * TRAIN_TEST_SPLIT)
-    return X[:split], y[:split], X[split:], y[split:], feature_scaler, close_scaler, df.columns.tolist()
+    
+    return (
+        X[indices[:split]], y[indices[:split]],
+        X[indices[split:]], y[indices[split:]],
+        feature_scaler, close_scaler, feature_cols
+    )
 
 def build_model(hp):
-    """Build model with correct input shape"""
-    # The input shape should match the number of features (9)
-    input_shape = (SEQUENCE_LENGTH, 9)  # Hardcoded to match add_technical_indicators()
-    
+    """Build model with verified input shape"""
     model = Sequential([
         Conv1D(
             filters=hp.Int('conv_filters', 32, 128, step=32),
             kernel_size=hp.Int('kernel_size', 3, 5, step=1),
             activation='relu',
-            input_shape=input_shape
+            input_shape=(SEQUENCE_LENGTH, FEATURE_COUNT)  # Use FEATURE_COUNT from config
         ),
         MaxPooling1D(2),
         LSTM(
@@ -234,7 +254,7 @@ def build_model(hp):
     return model
 
 def train_model(token, timeframe):
-    """Train model with consistent data shape"""
+    """Train model with enhanced validation"""
     symbol = f"{token}{FIAT_CURRENCY}"
     tag = f"{token}_{timeframe}"
     model_path = os.path.join(MODEL_DIR, f"{tag}_model.h5")
@@ -248,10 +268,11 @@ def train_model(token, timeframe):
         send_telegram_message(f"🚀 Starting {tag} training")
         
         df = fetch_binance_data(symbol, timeframe)
-        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, feat_cols = prepare_data(df)
+        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, _ = prepare_data(df)
         
-        # Verify input shape matches model expectations
-        print(f"Training data shape: {X_train.shape}")  # Should be (samples, 60, 9)
+        # Verify shapes before training
+        logger.info(f"Input shape: {X_train.shape}")
+        logger.info(f"Output shape: {y_train.shape}")
         
         tuner = kt.Hyperband(
             build_model,
@@ -287,7 +308,7 @@ def train_model(token, timeframe):
         raise
 
 def main():
-    """Main training pipeline"""
+    """Main training pipeline with error handling"""
     try:
         logger.info("Starting training pipeline")
         send_telegram_message("🏁 Starting training pipeline")
