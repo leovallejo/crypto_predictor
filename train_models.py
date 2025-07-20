@@ -3,6 +3,8 @@ os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+# Essential imports at the top
+import google.protobuf
 import numpy as np
 import pandas as pd
 import requests
@@ -93,25 +95,12 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
                 'Accept-Language': 'en-US,en;q=0.9'
             }
             
-            # Try with and without proxies
-            try:
-                response = requests.get(
-                    endpoint,
-                    params=params,
-                    headers=headers,
-                    timeout=15
-                )
-            except:
-                response = requests.get(
-                    endpoint,
-                    params=params,
-                    headers=headers,
-                    timeout=15,
-                    proxies={
-                        'http': os.getenv('PROXY_URL', ''),
-                        'https': os.getenv('PROXY_URL', '')
-                    }
-                )
+            response = requests.get(
+                endpoint,
+                params=params,
+                headers=headers,
+                timeout=15
+            )
             
             if response.status_code == 451:
                 # Try alternative data source if Binance blocks us
