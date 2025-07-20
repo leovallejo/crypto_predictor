@@ -1,7 +1,10 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force CPU
+
 import numpy as np
 import pandas as pd
 import joblib
+import time
 from datetime import datetime
 from tensorflow.keras.models import load_model
 from config import *
@@ -26,20 +29,24 @@ class SwingPredictor:
 
     def predict(self, token, timeframe):
         tag = f"{token}_{timeframe}"
-        df = fetch_binance_data(f"{token}{FIAT_CURRENCY}", timeframe, SEQUENCE_LENGTH+10)
-        df = add_technical_indicators(df)
-        
-        features = self.scalers[tag]['feature'].transform(df.tail(SEQUENCE_LENGTH))
-        pred = self.models[tag].predict(features[np.newaxis, ...])[0]
-        pred_prices = self.scalers[tag]['close'].inverse_transform(pred.reshape(-1, 1)).flatten()
-        
-        return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'symbol': token,
-            'timeframe': timeframe,
-            'current': df['close'].iloc[-1],
-            'predictions': pred_prices.tolist()
-        }
+        try:
+            df = fetch_binance_data(f"{token}{FIAT_CURRENCY}", timeframe, SEQUENCE_LENGTH+10)
+            df = add_technical_indicators(df)
+            
+            features = self.scalers[tag]['feature'].transform(df.tail(SEQUENCE_LENGTH))
+            pred = self.models[tag].predict(features[np.newaxis, ...])[0]
+            pred_prices = self.scalers[tag]['close'].inverse_transform(pred.reshape(-1, 1)).flatten()
+            
+            return {
+                'timestamp': datetime.utcnow().isoformat(),
+                'symbol': token,
+                'timeframe': timeframe,
+                'current': df['close'].iloc[-1],
+                'predictions': pred_prices.tolist()
+            }
+        except Exception as e:
+            print(f"Prediction failed for {tag}: {str(e)}")
+            return None
 
 if __name__ == "__main__":
     predictor = SwingPredictor()
@@ -48,6 +55,9 @@ if __name__ == "__main__":
         predictions = []
         for timeframe in TIMEFRAMES:
             for token in SUPPORTED_TOKENS:
-                predictions.append(predictor.predict(token, timeframe))
-        pd.DataFrame(predictions).to_csv(PREDICTION_HISTORY_FILE, mode='a', header=not os.path.exists(PREDICTION_HISTORY_FILE))
+                pred = predictor.predict(token, timeframe)
+                if pred:
+                    predictions.append(pred)
+        pd.DataFrame(predictions).to_csv(PREDICTION_HISTORY_FILE, mode='a', 
+                                        header=not os.path.exists(PREDICTION_HISTORY_FILE))
         time.sleep(PREDICTION_INTERVAL)
