@@ -1,10 +1,20 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# For Colab, we'll use a different base directory
+BASE_DIR = os.getcwd()  # Use current working directory in Colab
+
+# Load environment variables from Colab secrets if available
+try:
+    from google.colab import userdata
+    TELEGRAM_BOT_TOKEN = userdata.get('TELEGRAM_BOT_TOKEN', "")
+    TELEGRAM_CHAT_ID = userdata.get('TELEGRAM_CHAT_ID', "")
+except:
+    load_dotenv()
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # Directory Config
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, 'models')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -25,25 +35,22 @@ EARLY_STOPPING_PATIENCE = 5
 HYPERBAND_ITERATIONS = 1
 BATCH_SIZE = 32
 
-# Feature Engineering - Updated to match actual feature count
+# Feature Engineering
 TECHNICAL_INDICATORS = {
     'MA': [7, 14],    # 2 features
     'RSI': True,      # 1 feature
     'MACD': True      # 2 features (MACD and Signal line)
 }
 
-# Base features (open, high, low, close, volume, log_ret) = 6 features
+# Feature count calculation:
+# Base features: open, high, low, close, volume, log_ret = 6
 # MA: 2, RSI: 1, MACD: 2 = 5 additional features
-FEATURE_COUNT = 6 + 2 + 1 + 2  # Total 11 features
+FEATURE_COUNT = 11  # 6 base + 5 technical indicators
 
 # API Config
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 DATA_FETCH_LIMIT = 500
-
-# Telegram Config
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # Logging Config
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
