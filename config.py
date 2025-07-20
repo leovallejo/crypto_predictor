@@ -27,10 +27,14 @@ BATCH_SIZE = 32
 
 # Feature Engineering - Updated to match actual feature count
 TECHNICAL_INDICATORS = {
-    'MA': [7, 14],
-    'RSI': [14],
-    'MACD': [12, 26]
+    'MA': [7, 14],    # 2 features
+    'RSI': True,      # 1 feature
+    'MACD': True      # 2 features (MACD and Signal line)
 }
+
+# Base features (open, high, low, close, volume, log_ret) = 6 features
+# MA: 2, RSI: 1, MACD: 2 = 5 additional features
+FEATURE_COUNT = 6 + 2 + 1 + 2  # Total 11 features
 
 # API Config
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
@@ -49,6 +53,3 @@ LOG_FILE = os.path.join(BASE_DIR, 'training.log')
 REFRESH_INTERVAL = 5
 SHOW_LAST_N = 10
 PREDICTION_HISTORY_FILE = os.path.join(DATA_DIR, 'prediction_history.csv')
-
-# Calculate expected feature count (must match model input shape)
-FEATURE_COUNT = 5 + len(TECHNICAL_INDICATORS['MA']) + len(TECHNICAL_INDICATORS['RSI']) + len(TECHNICAL_INDICATORS['MACD'])
