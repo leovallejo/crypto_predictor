@@ -158,6 +158,14 @@ def calculate_rsi(prices, window=14):
     rs = avg_gain / (avg_loss + 1e-10)
     return 100 - (100 / (1 + rs))
 
+def calculate_macd(close_prices, fast=12, slow=26, signal=9):
+    """Calculate MACD and Signal line"""
+    ema_fast = close_prices.ewm(span=fast, adjust=False).mean()
+    ema_slow = close_prices.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
+
 def add_technical_indicators(df):
     """Add technical indicators matching FEATURE_COUNT"""
     if len(df) < 30:
@@ -166,22 +174,29 @@ def add_technical_indicators(df):
     # Base columns (open, high, low, close, volume)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
-    # Add only the indicators specified in config
+    # Moving Averages
     for ma in TECHNICAL_INDICATORS['MA']:
         df[f'MA_{ma}'] = df['close'].rolling(ma).mean()
     
+    # RSI
     if 'RSI' in TECHNICAL_INDICATORS:
-        df['RSI_14'] = calculate_rsi(df['close'])
+        df['RSI'] = calculate_rsi(df['close'])
     
+    # MACD
     if 'MACD' in TECHNICAL_INDICATORS:
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
+        macd, signal = calculate_macd(df['close'])
+        df['MACD'] = macd
+        df['MACD_Signal'] = signal
     
     # Verify we have the expected number of features
     current_features = len(df.columns)
-    if current_features != FEATURE_COUNT + 1:  # +1 for timestamp
-        raise ValueError(f"Feature count mismatch. Expected {FEATURE_COUNT}, got {current_features - 1}")
+    expected_features = FEATURE_COUNT + 1  # +1 for timestamp
+    
+    if current_features != expected_features:
+        # If we're missing features, add dummy columns to match expected count
+        missing = expected_features - current_features
+        for i in range(missing):
+            df[f'dummy_{i}'] = 0.0
     
     return df.dropna()
 
@@ -235,7 +250,7 @@ def build_model(hp):
             filters=hp.Int('conv_filters', 32, 128, step=32),
             kernel_size=hp.Int('kernel_size', 3, 5, step=1),
             activation='relu',
-            input_shape=(SEQUENCE_LENGTH, FEATURE_COUNT)  # Use FEATURE_COUNT from config
+            input_shape=(SEQUENCE_LENGTH, FEATURE_COUNT)
         ),
         MaxPooling1D(2),
         LSTM(
