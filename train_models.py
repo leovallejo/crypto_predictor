@@ -1,16 +1,17 @@
 import os
-os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'  # Protobuf workaround
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force CPU-only mode
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow warnings
+os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import numpy as np
 import pandas as pd
 import requests
 import joblib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import random
+from fake_useragent import UserAgent
 
 # Import TensorFlow after environment variables
 import tensorflow as tf
@@ -20,8 +21,6 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import (EarlyStopping, ModelCheckpoint, ReduceLROnPlateau)
 from tensorflow.keras.losses import Huber
 from sklearn.preprocessing import RobustScaler
-
-# Import Keras Tuner after TensorFlow
 import keras_tuner as kt
 from config import *
 
@@ -33,15 +32,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Additional warning suppression
+# Suppress warnings
 tf.get_logger().setLevel('ERROR')
 tf.autograph.set_verbosity(0)
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 logging.getLogger('keras-tuner').setLevel(logging.ERROR)
 
+# Initialize fake user agent
+ua = UserAgent()
+
 def configure_environment():
     """Configure environment for CPU-only training"""
-    tf.config.set_visible_devices([], 'GPU')  # Hide GPUs
+    tf.config.set_visible_devices([], 'GPU')
+    print(f"Protobuf version: {google.protobuf.__version__}")
     print("Environment configured for CPU-only training")
     print(f"TensorFlow version: {tf.__version__}")
     print(f"Keras Tuner version: {kt.__version__}")
@@ -49,53 +52,74 @@ def configure_environment():
 configure_environment()
 
 def send_telegram_message(message):
-    """Send notifications via Telegram with retry logic"""
+    """Send notifications via Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
         
-    for attempt in range(3):
-        try:
-            response = requests.post(
-                TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN),
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-                timeout=10
-            )
-            response.raise_for_status()
-            return
-        except Exception as e:
-            if attempt == 2:
-                logger.error(f"Failed to send Telegram message: {str(e)}")
-            time.sleep(2)
+    try:
+        response = requests.post(
+            TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN),
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            timeout=10
+        )
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Telegram error: {str(e)}")
 
 def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
-    """Fetch OHLCV data with robust error handling"""
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-        'Mozilla/5.0 (X11; Linux x86_64)'
+    """Fetch OHLCV data with multiple fallback strategies"""
+    endpoints = [
+        "https://api.binance.com/api/v3/klines",
+        "https://api1.binance.com/api/v3/klines",
+        "https://api2.binance.com/api/v3/klines",
+        "https://api3.binance.com/api/v3/klines"
     ]
+    
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'limit': min(limit, 500)  # Smaller chunks more likely to succeed
+    }
     
     for attempt in range(5):
         try:
-            response = requests.get(
-                BINANCE_API_URL,
-                params={
-                    'symbol': symbol,
-                    'interval': interval,
-                    'limit': min(limit, 1000)  # More reliable with smaller chunks
-                },
-                headers={'User-Agent': random.choice(user_agents)},
-                timeout=15
-            )
+            # Rotate through endpoints
+            endpoint = endpoints[attempt % len(endpoints)]
             
-            if response.status_code == 429:
-                wait = int(response.headers.get('Retry-After', 5))
-                logger.warning(f"Rate limited. Waiting {wait} seconds...")
-                time.sleep(wait)
-                continue
+            # Use random user agent
+            headers = {
+                'User-Agent': ua.random,
+                'Accept': 'application/json',
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
+            
+            # Try with and without proxies
+            try:
+                response = requests.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=15
+                )
+            except:
+                response = requests.get(
+                    endpoint,
+                    params=params,
+                    headers=headers,
+                    timeout=15,
+                    proxies={
+                        'http': os.getenv('PROXY_URL', ''),
+                        'https': os.getenv('PROXY_URL', '')
+                    }
+                )
+            
+            if response.status_code == 451:
+                # Try alternative data source if Binance blocks us
+                return fetch_alternative_data(symbol, interval, limit)
                 
             response.raise_for_status()
             
+            # Process successful response
             df = pd.DataFrame(
                 response.json(),
                 columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -107,8 +131,56 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
             
         except Exception as e:
             if attempt == 4:
-                raise Exception(f"Failed after 5 attempts: {str(e)}")
-            time.sleep((attempt + 1) * 2)
+                logger.error(f"Failed after 5 attempts for {symbol}/{interval}")
+                raise Exception(f"All data sources failed for {symbol}/{interval}")
+            wait_time = (attempt + 1) * 5
+            logger.warning(f"Attempt {attempt + 1} failed, waiting {wait_time}s...")
+            time.sleep(wait_time)
+
+def fetch_alternative_data(symbol, interval, limit):
+    """Fallback data source when Binance API fails"""
+    logger.warning(f"Using alternative data source for {symbol}/{interval}")
+    
+    # Calculate start/end times
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=min(limit, 365))
+    
+    try:
+        # Try CoinGecko as fallback
+        from pycoingecko import CoinGeckoAPI
+        cg = CoinGeckoAPI()
+        
+        # Map Binance intervals to CoinGecko days
+        interval_map = {
+            '1h': 'hourly',
+            '4h': 'hourly',
+            '1d': 'daily'
+        }
+        
+        coin_id = 'bitcoin' if 'BTC' in symbol else 'ethereum'
+        data = cg.get_coin_market_chart_range_by_id(
+            id=coin_id,
+            vs_currency='usd',
+            from_timestamp=int(start_time.timestamp()),
+            to_timestamp=int(end_time.timestamp())
+        )
+        
+        # Convert to similar format as Binance data
+        df = pd.DataFrame(data['prices'], columns=['timestamp', 'close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # Add required columns with dummy data
+        df['open'] = df['close']
+        df['high'] = df['close']
+        df['low'] = df['close']
+        df['volume'] = 0  # CoinGecko doesn't provide volume in this endpoint
+        
+        return df.astype(float)
+        
+    except Exception as e:
+        logger.error(f"Alternative data source failed: {str(e)}")
+        raise Exception("All data sources failed")
 
 def calculate_rsi(prices, window=14):
     """Calculate Relative Strength Index"""
@@ -122,6 +194,9 @@ def calculate_rsi(prices, window=14):
 
 def add_technical_indicators(df):
     """Add simplified technical indicators"""
+    if len(df) < 30:  # Minimum data points needed
+        raise ValueError("Insufficient data points for indicators")
+    
     # Basic indicators
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
