@@ -190,12 +190,20 @@ def add_technical_indicators(df):
         df['MACD'] = macd
         df['MACD_Signal'] = signal
     
+    # Select only the features we want to keep
+    selected_features = ['open', 'high', 'low', 'close', 'volume', 'log_ret']
+    selected_features.extend([f'MA_{ma}' for ma in TECHNICAL_INDICATORS['MA']])
+    if TECHNICAL_INDICATORS['RSI']:
+        selected_features.append('RSI')
+    if TECHNICAL_INDICATORS['MACD']:
+        selected_features.extend(['MACD', 'MACD_Signal'])
+    
+    df = df[selected_features]
+    
     # Verify we have the expected number of features
     current_features = len(df.columns)
-    expected_features = FEATURE_COUNT
-    
-    if current_features != expected_features:
-        raise ValueError(f"Feature count mismatch. Expected {expected_features}, got {current_features}")
+    if current_features != FEATURE_COUNT:
+        raise ValueError(f"Feature count mismatch. Expected {FEATURE_COUNT}, got {current_features}")
     
     return df.dropna()
 
@@ -204,7 +212,7 @@ def create_sequences(data, seq_length, horizon):
     X, y = [], []
     for i in range(seq_length, len(data) - horizon):
         X.append(data[i-seq_length:i])
-        y.append(data[i:i+horizon, 0])  # Predict close price
+        y.append(data[i:i+horizon, 3])  # Predict close price (index 3)
     
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.float32)
@@ -218,7 +226,7 @@ def create_sequences(data, seq_length, horizon):
 def prepare_data(df):
     """Prepare training data with shape validation"""
     df = add_technical_indicators(df)
-    feature_cols = [col for col in df.columns]
+    feature_cols = list(df.columns)
     
     # Scaling
     feature_scaler = RobustScaler()
@@ -228,7 +236,7 @@ def prepare_data(df):
     close_prices = close_scaler.fit_transform(df[['close']])
     
     # Combine and create sequences
-    processed_data = np.concatenate([close_prices, features], axis=1)
+    processed_data = features  # We already have all features including close price
     X, y = create_sequences(processed_data, SEQUENCE_LENGTH, FORECAST_HORIZON)
     
     # Train-test split with shuffling
