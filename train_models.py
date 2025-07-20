@@ -100,11 +100,13 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
                 
             response.raise_for_status()
             
+            data = response.json()
             df = pd.DataFrame(
-                response.json(),
-                columns=["timestamp", "open", "high", "low", "close", "volume"]
-            )[[0, 1, 2, 3, 4, 5]]
-            df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
+                data,
+                columns=["timestamp", "open", "high", "low", "close", "volume", "close_time",
+                         "quote_asset_volume", "trades", "taker_buy_base", "taker_buy_quote", "ignore"]
+            )
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             return df.astype(float)
@@ -179,24 +181,21 @@ def add_technical_indicators(df):
         df[f'MA_{ma}'] = df['close'].rolling(ma).mean()
     
     # RSI
-    if 'RSI' in TECHNICAL_INDICATORS:
+    if TECHNICAL_INDICATORS['RSI']:
         df['RSI'] = calculate_rsi(df['close'])
     
     # MACD
-    if 'MACD' in TECHNICAL_INDICATORS:
+    if TECHNICAL_INDICATORS['MACD']:
         macd, signal = calculate_macd(df['close'])
         df['MACD'] = macd
         df['MACD_Signal'] = signal
     
     # Verify we have the expected number of features
     current_features = len(df.columns)
-    expected_features = FEATURE_COUNT + 1  # +1 for timestamp
+    expected_features = FEATURE_COUNT
     
     if current_features != expected_features:
-        # If we're missing features, add dummy columns to match expected count
-        missing = expected_features - current_features
-        for i in range(missing):
-            df[f'dummy_{i}'] = 0.0
+        raise ValueError(f"Feature count mismatch. Expected {expected_features}, got {current_features}")
     
     return df.dropna()
 
@@ -219,7 +218,7 @@ def create_sequences(data, seq_length, horizon):
 def prepare_data(df):
     """Prepare training data with shape validation"""
     df = add_technical_indicators(df)
-    feature_cols = [col for col in df.columns if col != 'timestamp']
+    feature_cols = [col for col in df.columns]
     
     # Scaling
     feature_scaler = RobustScaler()
@@ -344,4 +343,9 @@ def main():
         raise
 
 if __name__ == "__main__":
+    # Create necessary directories in Colab
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.join(MODEL_DIR, 'tuning'), exist_ok=True)
+    
     main()
