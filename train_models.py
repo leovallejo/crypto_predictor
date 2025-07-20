@@ -3,8 +3,6 @@ os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# Essential imports at the top
-import google.protobuf
 import numpy as np
 import pandas as pd
 import requests
@@ -14,6 +12,7 @@ from datetime import datetime, timedelta
 import time
 import random
 from fake_useragent import UserAgent
+import google.protobuf
 
 # Import TensorFlow after environment variables
 import tensorflow as tf
@@ -80,35 +79,20 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
     params = {
         'symbol': symbol,
         'interval': interval,
-        'limit': min(limit, 500)  # Smaller chunks more likely to succeed
+        'limit': min(limit, 500)
     }
     
     for attempt in range(5):
         try:
-            # Rotate through endpoints
             endpoint = endpoints[attempt % len(endpoints)]
-            
-            # Use random user agent
-            headers = {
-                'User-Agent': ua.random,
-                'Accept': 'application/json',
-                'Accept-Language': 'en-US,en;q=0.9'
-            }
-            
-            response = requests.get(
-                endpoint,
-                params=params,
-                headers=headers,
-                timeout=15
-            )
+            headers = {'User-Agent': ua.random}
+            response = requests.get(endpoint, params=params, headers=headers, timeout=15)
             
             if response.status_code == 451:
-                # Try alternative data source if Binance blocks us
                 return fetch_alternative_data(symbol, interval, limit)
                 
             response.raise_for_status()
             
-            # Process successful response
             df = pd.DataFrame(
                 response.json(),
                 columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -122,30 +106,18 @@ def fetch_binance_data(symbol, interval, limit=DATA_FETCH_LIMIT):
             if attempt == 4:
                 logger.error(f"Failed after 5 attempts for {symbol}/{interval}")
                 raise Exception(f"All data sources failed for {symbol}/{interval}")
-            wait_time = (attempt + 1) * 5
-            logger.warning(f"Attempt {attempt + 1} failed, waiting {wait_time}s...")
-            time.sleep(wait_time)
+            time.sleep((attempt + 1) * 5)
 
 def fetch_alternative_data(symbol, interval, limit):
     """Fallback data source when Binance API fails"""
     logger.warning(f"Using alternative data source for {symbol}/{interval}")
+    from pycoingecko import CoinGeckoAPI
+    cg = CoinGeckoAPI()
     
-    # Calculate start/end times
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=min(limit, 365))
     
     try:
-        # Try CoinGecko as fallback
-        from pycoingecko import CoinGeckoAPI
-        cg = CoinGeckoAPI()
-        
-        # Map Binance intervals to CoinGecko days
-        interval_map = {
-            '1h': 'hourly',
-            '4h': 'hourly',
-            '1d': 'daily'
-        }
-        
         coin_id = 'bitcoin' if 'BTC' in symbol else 'ethereum'
         data = cg.get_coin_market_chart_range_by_id(
             id=coin_id,
@@ -154,19 +126,14 @@ def fetch_alternative_data(symbol, interval, limit):
             to_timestamp=int(end_time.timestamp())
         )
         
-        # Convert to similar format as Binance data
         df = pd.DataFrame(data['prices'], columns=['timestamp', 'close'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        
-        # Add required columns with dummy data
         df['open'] = df['close']
         df['high'] = df['close']
         df['low'] = df['close']
-        df['volume'] = 0  # CoinGecko doesn't provide volume in this endpoint
-        
+        df['volume'] = 0
         return df.astype(float)
-        
     except Exception as e:
         logger.error(f"Alternative data source failed: {str(e)}")
         raise Exception("All data sources failed")
@@ -182,70 +149,73 @@ def calculate_rsi(prices, window=14):
     return 100 - (100 / (1 + rs))
 
 def add_technical_indicators(df):
-    """Add simplified technical indicators"""
-    if len(df) < 30:  # Minimum data points needed
-        raise ValueError("Insufficient data points for indicators")
+    """Add technical indicators matching the expected feature count"""
+    # Calculate the number of features we need based on TECHNICAL_INDICATORS
+    expected_features = 9  # This should match your model's input shape
     
-    # Basic indicators
+    # Basic price features (5 total: open, high, low, close, volume)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
-    # Moving Averages
-    for ma in TECHNICAL_INDICATORS['MA']:
+    # Moving Averages (adds len(TECHNICAL_INDICATORS['MA']) features)
+    for ma in TECHNICAL_INDICATORS['MA'][:2]:  # Limit to 2 MAs to match expected_features
         df[f'MA_{ma}'] = df['close'].rolling(ma).mean()
     
-    # RSI
+    # RSI (adds 1 feature)
     df['RSI_14'] = calculate_rsi(df['close'])
     
-    # MACD
+    # MACD (adds 1 feature)
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     
-    return df.dropna()
+    # Ensure we have exactly the expected number of features
+    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'log_ret',
+                   'MA_7', 'MA_14', 'RSI_14', 'MACD']
+    feature_cols = feature_cols[:expected_features]
+    
+    return df[feature_cols].dropna()
 
 def create_sequences(data, seq_length, horizon):
     """Create time-series sequences"""
     X, y = [], []
     for i in range(seq_length, len(data) - horizon):
         X.append(data[i-seq_length:i])
-        y.append(data[i:i+horizon, 0])  # Predict close price
+        y.append(data[i:i+horizon, 3])  # Predict close price (index 3)
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 def prepare_data(df):
-    """Prepare training data with scaling"""
+    """Prepare training data with consistent feature count"""
     df = add_technical_indicators(df)
-    feature_cols = [col for col in df.columns if col != 'timestamp']
+    
+    # Verify we have the correct number of features
+    num_features = len(df.columns)
+    print(f"Number of features in prepared data: {num_features}")  # Should be 9
     
     # Scaling
     feature_scaler = RobustScaler()
     close_scaler = RobustScaler()
     
-    features = feature_scaler.fit_transform(df[feature_cols])
+    features = feature_scaler.fit_transform(df)
     close_prices = close_scaler.fit_transform(df[['close']])
     
-    # Combine and create sequences
-    processed_data = np.concatenate([close_prices, features], axis=1)
-    X, y = create_sequences(processed_data, SEQUENCE_LENGTH, FORECAST_HORIZON)
+    # Create sequences
+    X, y = create_sequences(features, SEQUENCE_LENGTH, FORECAST_HORIZON)
     
-    # Train-test split with shuffling
-    indices = np.arange(len(X))
-    np.random.shuffle(indices)
+    # Train-test split
     split = int(len(X) * TRAIN_TEST_SPLIT)
-    
-    return (
-        X[indices[:split]], y[indices[:split]],
-        X[indices[split:]], y[indices[split:]],
-        feature_scaler, close_scaler, feature_cols
-    )
+    return X[:split], y[:split], X[split:], y[split:], feature_scaler, close_scaler, df.columns.tolist()
 
 def build_model(hp):
-    """Build CPU-optimized CNN-LSTM model"""
+    """Build model with correct input shape"""
+    # The input shape should match the number of features (9)
+    input_shape = (SEQUENCE_LENGTH, 9)  # Hardcoded to match add_technical_indicators()
+    
     model = Sequential([
         Conv1D(
             filters=hp.Int('conv_filters', 32, 128, step=32),
             kernel_size=hp.Int('kernel_size', 3, 5, step=1),
             activation='relu',
-            input_shape=(SEQUENCE_LENGTH, len(TECHNICAL_INDICATORS) + 5)
+            input_shape=input_shape
         ),
         MaxPooling1D(2),
         LSTM(
@@ -264,7 +234,7 @@ def build_model(hp):
     return model
 
 def train_model(token, timeframe):
-    """Train model for specific token/timeframe"""
+    """Train model with consistent data shape"""
     symbol = f"{token}{FIAT_CURRENCY}"
     tag = f"{token}_{timeframe}"
     model_path = os.path.join(MODEL_DIR, f"{tag}_model.h5")
@@ -278,7 +248,10 @@ def train_model(token, timeframe):
         send_telegram_message(f"🚀 Starting {tag} training")
         
         df = fetch_binance_data(symbol, timeframe)
-        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, _ = prepare_data(df)
+        X_train, y_train, X_test, y_test, feat_scaler, close_scaler, feat_cols = prepare_data(df)
+        
+        # Verify input shape matches model expectations
+        print(f"Training data shape: {X_train.shape}")  # Should be (samples, 60, 9)
         
         tuner = kt.Hyperband(
             build_model,
