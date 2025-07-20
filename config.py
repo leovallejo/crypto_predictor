@@ -1,10 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-# For Colab, we'll use a different base directory
-BASE_DIR = os.getcwd()  # Use current working directory in Colab
+# For Colab, use current working directory
+BASE_DIR = os.getcwd()
 
-# Load environment variables from Colab secrets if available
+# Load environment variables
 try:
     from google.colab import userdata
     TELEGRAM_BOT_TOKEN = userdata.get('TELEGRAM_BOT_TOKEN', "")
